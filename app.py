@@ -52,6 +52,13 @@ if "random_indices" not in st.session_state:
 if "selected_meals" not in st.session_state:
     st.session_state.selected_meals = {}
 
+# 常见常备调料/冰箱库存默认清单
+DEFAULT_PANTRY = ["盐", "黑胡椒", "食用油", "橄榄油", "生抽", "大蒜", "姜", "料酒", "水"]
+
+if "my_fridge_items" not in st.session_state:
+    st.session_state.my_fridge_items = ["盐", "黑胡椒", "食用油", "水"]
+
+
 # ==================== 4. 数值解析与用量计算 ====================
 def parse_and_multiply_ingredient(item_str, servings):
     """解析数字用量，直接乘以 servings 计算总数"""
@@ -73,8 +80,8 @@ def parse_and_multiply_ingredient(item_str, servings):
         return None, f"{item_str} ({servings} 份)"
 
 
-def generate_unified_shopping_list(selected_meals):
-    """汇总并合并所有食材"""
+def generate_unified_shopping_list(selected_meals, fridge_items):
+    """汇总并合并所有食材，同时剔除冰箱里已有的项目"""
     combined_ingredients = {}
 
     for recipe_id, info in selected_meals.items():
@@ -98,6 +105,11 @@ def generate_unified_shopping_list(selected_meals):
 
     shopping_rows = []
     for name_part, total_qty in combined_ingredients.items():
+        # 检查是否在冰箱已有清单中
+        is_in_fridge = any(
+            f_item.lower() in name_part.lower() for f_item in fridge_items
+        )
+
         if total_qty is not None:
             if total_qty.is_integer():
                 display_qty = str(int(total_qty))
@@ -107,16 +119,44 @@ def generate_unified_shopping_list(selected_meals):
         else:
             display_text = name_part
 
-        shopping_rows.append({"完成状态": False, "采购项目 (已汇总总份量)": display_text})
+        if not is_in_fridge:
+            shopping_rows.append(
+                {"完成状态": False, "采购项目 (已汇总总份量)": display_text}
+            )
 
     return shopping_rows
 
 
 # ==================== 5. 顶部 Header ====================
 st.title("🥗 智能菜谱选餐与采购助手")
-st.caption("Pick meals → Set servings → Get unified shopping list")
+st.caption(
+    "Pick meals → Set servings → Filter fridge inventory → Get shopping list"
+)
 
-# ==================== 6. 第一步：Meal Picker ====================
+# ==================== 6. 冰箱已有/常备调料管理 (我的冰箱里有什么) ====================
+with st.expander("🧊 我的冰箱里有什么？(勾选已有常备食材/调料，采购清单将自动剔除)"):
+    st.write("勾选你家中**已有**的调料或食材，生成的采购清单将不会包含它们：")
+
+    col_f1, col_f2 = st.columns([3, 1])
+    with col_f1:
+        st.session_state.my_fridge_items = st.multiselect(
+            "冰箱/调味罐常备清单：",
+            options=DEFAULT_PANTRY
+            + [
+                item
+                for item in st.session_state.my_fridge_items
+                if item not in DEFAULT_PANTRY
+            ],
+            default=st.session_state.my_fridge_items,
+        )
+    with col_f2:
+        new_item = st.text_input("手动添加已有食材：", placeholder="如: 鸡蛋")
+        if st.button("添加到冰箱"):
+            if new_item and new_item not in st.session_state.my_fridge_items:
+                st.session_state.my_fridge_items.append(new_item)
+                st.rerun()
+
+# ==================== 7. 第一步：Meal Picker ====================
 st.header("1. 🎲 选餐 (Meal Picker)")
 
 col_title, col_shuffle = st.columns([4, 1])
@@ -223,44 +263,67 @@ with st.expander("🔍 浏览全部菜谱 / Browse All Recipes"):
         elif b_id in st.session_state.selected_meals and not b_chk:
             del st.session_state.selected_meals[b_id]
 
-# ==================== 7. 第二步：已选菜单汇总 ====================
+# ==================== 8. 第二步：已选菜单汇总 ====================
 st.divider()
 st.header("2. 📋 已选菜单 (Selected Meals Summary)")
 
 if st.session_state.selected_meals:
     summary_items = []
     for r_id, info in st.session_state.selected_meals.items():
-        summary_items.append(f"• **{info['title']}**  —  `{info['servings']} servings`")
+        summary_items.append(
+            f"• **{info['title']}**  —  `{info['servings']} servings`"
+        )
     st.markdown("\n".join(summary_items))
 else:
     st.info("💡 暂未选择任何菜谱。请在上方勾选感兴趣的菜谱。")
 
-# ==================== 8. 第三步：统一采购清单 ====================
+# ==================== 9. 第三步：统一采购清单 ====================
 st.divider()
-st.header("3. 🛒 采购清单 (Unified Shopping List)")
+st.header("3. 🛒 采购清单 (Shopping List)")
 
 shopping_data = []
 if st.session_state.selected_meals:
-    shopping_data = generate_unified_shopping_list(st.session_state.selected_meals)
-
-    df_shopping = pd.DataFrame(shopping_data)
-    edited_df = st.data_editor(
-        df_shopping,
-        column_config={
-            "完成状态": st.column_config.CheckboxColumn(
-                "已买", default=False
-            ),
-            "采购项目 (已汇总总份量)": st.column_config.TextColumn(
-                "采购项目与用量", disabled=True
-            ),
-        },
-        disabled=["采购项目 (已汇总总份量)"],
-        hide_index=True,
-        use_container_width=True,
-        key="unified_shopping_editor",
+    shopping_data = generate_unified_shopping_list(
+        st.session_state.selected_meals, st.session_state.my_fridge_items
     )
 
-    # ==================== 9. 保存与导出功能 ====================
+    if shopping_data:
+        df_shopping = pd.DataFrame(shopping_data)
+        edited_df = st.data_editor(
+            df_shopping,
+            column_config={
+                "完成状态": st.column_config.CheckboxColumn(
+                    "已买", default=False
+                ),
+                "采购项目 (已汇总总份量)": st.column_config.TextColumn(
+                    "采购项目与用量", disabled=True
+                ),
+            },
+            disabled=["采购项目 (已汇总总份量)"],
+            hide_index=True,
+            use_container_width=True,
+            key="unified_shopping_editor",
+        )
+    else:
+        st.success(
+            "🎉 选中的食材你的冰箱里都有啦！无需购买额外食材。"
+        )
+
+    # ==================== 10. 中式厨房替代品指南 ====================
+    with st.expander("💡 常见西餐/外式调料 — 中式厨房替代指南 (Chinese Substitutes)"):
+        st.markdown(
+            """
+        * **卡宴辣椒粉 (Cayenne Pepper)** $\rightarrow$ 普通中式细辣椒面 / 辣椒粉
+        * **帕玛森芝士 / 芝士碎** $\rightarrow$ 可省去，或用少许盐和鲜味酱油提鲜
+        * **酸奶油 (Sour Cream) / 蛋黄酱 (Mayonnaise)** $\rightarrow$ 浓稠无糖酸奶 / 轻食沙拉酱
+        * **黄油 (Butter)** $\rightarrow$ 普通食用油 / 橄榄油（1:1 替代）
+        * **欧芹 / 西洋菜 (Parsley)** $\rightarrow$ 香菜 / 芹菜叶
+        * **第戎芥末酱 (Dijon Mustard)** $\rightarrow$ 黄芥末酱 / 少许青芥辣(Wasabi)+醋
+        * **黑椒汁 / 鸡汤浓缩粉** $\rightarrow$ 浓汤宝 / 蚝油 + 现磨黑胡椒
+        """
+        )
+
+    # ==================== 11. 保存与导出功能 ====================
     st.divider()
     st.header("💾 保存 / 导出菜单与清单")
 
@@ -270,8 +333,11 @@ if st.session_state.selected_meals:
         export_text += f"• {info['title']} ({info['servings']} 份/servings)\n"
 
     export_text += "\n==== 🛒 统一采购清单 (Shopping List) ====\n\n"
-    for item in shopping_data:
-        export_text += f"[ ] {item['采购项目 (已汇总总份量)']}\n"
+    if shopping_data:
+        for item in shopping_data:
+            export_text += f"[ ] {item['采购项目 (已汇总总份量)']}\n"
+    else:
+        export_text += "（无需采购，冰箱已有食材已满足所有菜谱需求）\n"
 
     st.download_button(
         label="📥 点击下载 txt 文本文件保存到本地",
