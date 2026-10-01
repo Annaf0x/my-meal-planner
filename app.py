@@ -34,7 +34,7 @@ def load_data():
     else:
         df["img_link"] = ""
 
-    # 给每道菜赋予唯一 ID，为后续 Meal Planner 及 Inventory 留出接口
+    # 给每道菜赋予唯一 ID
     if "recipe_id" not in df.columns:
         df["recipe_id"] = [f"recipe_{i}" for i in range(len(df))]
 
@@ -44,80 +44,38 @@ def load_data():
 df_recipes = load_data()
 
 # ==================== 3. Session State 状态初始化 ====================
-# 初始化 3 个随机推荐菜谱的索引
 if "random_indices" not in st.session_state:
     st.session_state.random_indices = random.sample(
         range(len(df_recipes)), min(3, len(df_recipes))
     )
 
-# 初始化已选菜谱及其 Servings (为 Weekly Planner & Inventory 留接口)
-# 结构: { recipe_id: {"title": str, "servings": int, "row": pd.Series} }
 if "selected_meals" not in st.session_state:
     st.session_state.selected_meals = {}
 
-# ==================== 4. 辅助函数：食材分类与合并 ====================
-PRODUCE_KEYWORDS = [
-    "菜",
-    "蔬",
-    "果",
-    "葱",
-    "姜",
-    "蒜",
-    "椒",
-    "菇",
-    "土豆",
-    "番茄",
-    "西红柿",
-    "洋葱",
-    "胡萝卜",
-    "黄瓜",
-    "菠菜",
-    "生菜",
-    "柠檬",
-    "produce",
-    "onion",
-    "tomato",
-    "carrot",
-    "garlic",
-]
-MEAT_KEYWORDS = [
-    "肉",
-    "鸡",
-    "牛",
-    "猪",
-    "羊",
-    "虾",
-    "鱼",
-    "蛋",
-    "排骨",
-    "培根",
-    "三文鱼",
-    "海鲜",
-    "meat",
-    "seafood",
-    "beef",
-    "chicken",
-    "pork",
-    "shrimp",
-    "salmon",
-    "fish",
-]
+# ==================== 4. 数值解析与用量计算 ====================
+def parse_and_multiply_ingredient(item_str, servings):
+    """解析数字用量，直接乘以 servings 计算总数"""
+    item_str = item_str.strip().strip("*")
+    match = re.match(r"^([\d\.]+)\s*(.*)", item_str)
 
+    if match:
+        num = float(match.group(1))
+        unit_and_name = match.group(2)
+        total_num = num * servings
 
-def categorize_ingredient(item_name):
-    """将食材自动归类为 Produce, Meat / Seafood, Pantry"""
-    name_lower = item_name.lower()
-    if any(kw in name_lower for kw in MEAT_KEYWORDS):
-        return "🥩 Meat / Seafood (肉类海鲜)"
-    elif any(kw in name_lower for kw in PRODUCE_KEYWORDS):
-        return "🥬 Produce (农货蔬菜)"
+        if total_num.is_integer():
+            formatted_num = str(int(total_num))
+        else:
+            formatted_num = f"{total_num:.2f}".rstrip("0").rstrip(".")
+
+        return formatted_num, unit_and_name
     else:
-        return "🧂 Pantry (调味干货/其他)"
+        return None, f"{item_str} ({servings} 份)"
 
 
-def generate_categorized_shopping_list(selected_meals):
-    """根据选中的菜谱及 Servings 自动计算并归类 Shopping List"""
-    raw_ingredients = []
+def generate_unified_shopping_list(selected_meals):
+    """汇总并合并所有食材"""
+    combined_ingredients = {}
 
     for recipe_id, info in selected_meals.items():
         servings = info["servings"]
@@ -126,36 +84,39 @@ def generate_categorized_shopping_list(selected_meals):
 
         for item in items:
             cleaned = item.strip().strip("•").strip()
-            if cleaned:
-                raw_ingredients.append((cleaned, servings))
+            if not cleaned:
+                continue
 
-    # 合并同类项（累加 Servings 份量）
-    item_totals = {}
-    for item, serv in raw_ingredients:
-        item_totals[item] = item_totals.get(item, 0) + serv
+            num, name_part = parse_and_multiply_ingredient(cleaned, servings)
 
-    # 按类别分组
-    categorized_data = {
-        "🥬 Produce (农货蔬菜)": [],
-        "🥩 Meat / Seafood (肉类海鲜)": [],
-        "🧂 Pantry (调味干货/其他)": [],
-    }
+            if num is not None:
+                if name_part not in combined_ingredients:
+                    combined_ingredients[name_part] = 0.0
+                combined_ingredients[name_part] += float(num)
+            else:
+                combined_ingredients[name_part] = None
 
-    for item, total_serv in item_totals.items():
-        cat = categorize_ingredient(item)
-        display_text = (
-            f"{item} — {total_serv} 份量" if total_serv > 1 else item
-        )
-        categorized_data[cat].append({"已购/已有": False, "食材项目": display_text})
+    shopping_rows = []
+    for name_part, total_qty in combined_ingredients.items():
+        if total_qty is not None:
+            if total_qty.is_integer():
+                display_qty = str(int(total_qty))
+            else:
+                display_qty = f"{total_qty:.2f}".rstrip("0").rstrip(".")
+            display_text = f"{display_qty} {name_part}"
+        else:
+            display_text = name_part
 
-    return categorized_data
+        shopping_rows.append({"完成状态": False, "采购项目 (已汇总总份量)": display_text})
+
+    return shopping_rows
 
 
 # ==================== 5. 顶部 Header ====================
 st.title("🥗 智能菜谱选餐与采购助手")
-st.caption("Pick meals → Set servings → Get categorized shopping list")
+st.caption("Pick meals → Set servings → Get unified shopping list")
 
-# ==================== 6. 第一步：Meal Picker (3 个随机推荐 + Shuffle) ====================
+# ==================== 6. 第一步：Meal Picker ====================
 st.header("1. 🎲 选餐 (Meal Picker)")
 
 col_title, col_shuffle = st.columns([4, 1])
@@ -166,7 +127,6 @@ with col_shuffle:
         )
         st.rerun()
 
-# 展示 3 个随机卡片
 card_cols = st.columns(3)
 random_rows = df_recipes.iloc[st.session_state.random_indices]
 
@@ -176,7 +136,6 @@ for idx, (_, row) in enumerate(random_rows.iterrows()):
 
     with card_cols[idx]:
         with st.container(border=True):
-            # 渲染图片
             img_src = str(row["img_link"]).strip()
             if img_src.startswith("http"):
                 st.image(img_src, use_container_width=True)
@@ -186,13 +145,11 @@ for idx, (_, row) in enumerate(random_rows.iterrows()):
             st.subheader(r_title)
             st.caption(f"⏱ 准备时间：{row['prep_time']}")
 
-            # 选择框状态维护
             is_selected = r_id in st.session_state.selected_meals
             checked = st.checkbox(
                 "Select / 选择这道菜", value=is_selected, key=f"chk_{r_id}"
             )
 
-            # Servings 份数调节
             current_servings = (
                 st.session_state.selected_meals[r_id]["servings"]
                 if is_selected
@@ -206,7 +163,6 @@ for idx, (_, row) in enumerate(random_rows.iterrows()):
                 key=f"serv_{r_id}",
             )
 
-            # 动态更新全局 Session Selected Meals
             if checked:
                 st.session_state.selected_meals[r_id] = {
                     "title": r_title,
@@ -221,7 +177,7 @@ for idx, (_, row) in enumerate(random_rows.iterrows()):
                 st.write("**食材：**", row["ingredients"])
                 st.write("**步骤：**", row["instructions"])
 
-# 更多菜谱折叠浏览 (Browse More)
+# 更多菜谱折叠浏览
 with st.expander("🔍 浏览全部菜谱 / Browse All Recipes"):
     search_kw = st.text_input("搜索菜谱名称或食材：", "")
     browse_df = (
@@ -267,7 +223,7 @@ with st.expander("🔍 浏览全部菜谱 / Browse All Recipes"):
         elif b_id in st.session_state.selected_meals and not b_chk:
             del st.session_state.selected_meals[b_id]
 
-# ==================== 7. 第二步：已选菜单汇总 (Selected Meals) ====================
+# ==================== 7. 第二步：已选菜单汇总 ====================
 st.divider()
 st.header("2. 📋 已选菜单 (Selected Meals Summary)")
 
@@ -279,50 +235,55 @@ if st.session_state.selected_meals:
 else:
     st.info("💡 暂未选择任何菜谱。请在上方勾选感兴趣的菜谱。")
 
-# ==================== 8. 第三步：分组采购清单 (Categorized Shopping List) ====================
+# ==================== 8. 第三步：统一采购清单 ====================
 st.divider()
-st.header("3. 🛒 采购清单 (Shopping List)")
+st.header("3. 🛒 采购清单 (Unified Shopping List)")
 
+shopping_data = []
 if st.session_state.selected_meals:
-    categorized_list = generate_categorized_shopping_list(
-        st.session_state.selected_meals
+    shopping_data = generate_unified_shopping_list(st.session_state.selected_meals)
+
+    df_shopping = pd.DataFrame(shopping_data)
+    edited_df = st.data_editor(
+        df_shopping,
+        column_config={
+            "完成状态": st.column_config.CheckboxColumn(
+                "已买", default=False
+            ),
+            "采购项目 (已汇总总份量)": st.column_config.TextColumn(
+                "采购项目与用量", disabled=True
+            ),
+        },
+        disabled=["采购项目 (已汇总总份量)"],
+        hide_index=True,
+        use_container_width=True,
+        key="unified_shopping_editor",
     )
 
-    tab_produce, tab_meat, tab_pantry = st.tabs(
-        [
-            "🥬 Produce (农货蔬菜)",
-            "🥩 Meat / Seafood (肉类海鲜)",
-            "🧂 Pantry (调味干货)",
-        ]
+    # ==================== 9. 保存与导出功能 ====================
+    st.divider()
+    st.header("💾 保存 / 导出菜单与清单")
+
+    # 生成导出的文本内容
+    export_text = "==== 🥗 本周菜谱计划 (Meal Plan) ====\n\n"
+    for r_id, info in st.session_state.selected_meals.items():
+        export_text += f"• {info['title']} ({info['servings']} 份/servings)\n"
+
+    export_text += "\n==== 🛒 统一采购清单 (Shopping List) ====\n\n"
+    for item in shopping_data:
+        export_text += f"[ ] {item['采购项目 (已汇总总份量)']}\n"
+
+    st.download_button(
+        label="📥 点击下载 txt 文本文件保存到本地",
+        data=export_text,
+        file_name="my_meal_plan_and_shopping_list.txt",
+        mime="text/plain",
+        type="primary",
+        use_container_width=True,
     )
 
-    tabs_map = {
-        "🥬 Produce (农货蔬菜)": tab_produce,
-        "🥩 Meat / Seafood (肉类海鲜)": tab_meat,
-        "🧂 Pantry (调味干货/其他)": tab_pantry,
-    }
+    with st.expander("📄 或直接复制以下文本导出到手机/Notion"):
+        st.code(export_text, language="markdown")
 
-    for category, items in categorized_list.items():
-        target_tab = tabs_map[category]
-        with target_tab:
-            if items:
-                df_cat = pd.DataFrame(items)
-                st.data_editor(
-                    df_cat,
-                    column_config={
-                        "已购/已有": st.column_config.CheckboxColumn(
-                            "状态", default=False
-                        ),
-                        "食材项目": st.column_config.TextColumn(
-                            "项目名称 (含汇总份量)", disabled=True
-                        ),
-                    },
-                    disabled=["食材项目"],
-                    hide_index=True,
-                    use_container_width=True,
-                    key=f"editor_{category}",
-                )
-            else:
-                st.caption("该分类下暂无所需食材。")
 else:
     st.warning("👈 请先选择至少一道菜谱以生成采购清单。")
