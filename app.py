@@ -18,14 +18,16 @@ def load_data():
     try:
         df = pd.read_csv(file_path, encoding="utf-8-sig")
     except Exception:
-        # 兼容性处理
         df = pd.read_csv(file_path, encoding="gbk", errors="ignore")
 
-    # 填充空值
     df["title"] = df["title"].fillna("未命名菜谱")
     df["ingredients"] = df["ingredients"].fillna("")
     df["instructions"] = df["instructions"].fillna("暂无详细步骤")
     df["prep_time"] = df["prep_time"].fillna("15-20 分钟")
+    if "image" not in df.columns:
+        df["image"] = ""
+    else:
+        df["image"] = df["image"].fillna("")
     return df
 
 
@@ -33,12 +35,11 @@ df_recipes = load_data()
 
 # ==================== 3. 页面标题与侧边栏（冰箱库存） ====================
 st.title("🥗 单人高蛋白减脂菜谱 & 智能采购助手")
-st.caption("自动规划伙食 | 匹配冰箱现有食材 | 生成无刷新勾选清单")
+st.caption("批量餐数规划 | 匹配冰箱现有食材 | 自动生成无刷新合并采购清单")
 
 st.sidebar.header("🧊 冰箱现有库存 (Fridge Pantry)")
-st.sidebar.write("勾选或输入你冰箱里已有的食材，采购清单会自动帮你扣除：")
+st.sidebar.write("勾选或输入你冰箱里已有的食材，采购清单会自动扣除：")
 
-# 常见基础调味料/食材，默认勾选
 default_pantry = ["盐", "黑胡椒", "食用油", "大蒜", "酱油", "水"]
 user_pantry_input = st.sidebar.text_area(
     "输入其他现有食材（用逗号或换行隔开）：",
@@ -46,7 +47,6 @@ user_pantry_input = st.sidebar.text_area(
     help="例如：大蒜, 鸡蛋, 西兰花",
 )
 
-# 解析用户冰箱库存列表
 custom_pantry = [
     item.strip()
     for item in re.split(r"[,，\n]", user_pantry_input)
@@ -56,8 +56,8 @@ all_pantry = list(set(default_pantry + custom_pantry))
 
 st.sidebar.success(f"已识别冰箱食材 {len(all_pantry)} 种")
 
-# ==================== 4. 菜谱筛选与选择 ====================
-st.header("🍱 第一步：选择本周想吃的减脂菜谱")
+# ==================== 4. 菜谱筛选与餐数设置 ====================
+st.header("🍱 第一步：选择菜谱并指定餐数（如：午餐做 4 顿相同的）")
 
 search_term = st.text_input("🔍 搜索菜谱或食材（如：鸡肉、牛肉、虾、沙拉）：", "")
 
@@ -71,9 +71,8 @@ if search_term:
 else:
     filtered_df = df_recipes
 
-# 供用户多选菜谱
 selected_titles = st.multiselect(
-    "勾选你要加入本周菜单的菜谱（可多选）：",
+    "勾选你要加入本周菜单的菜谱：",
     options=filtered_df["title"].tolist(),
     default=(
         filtered_df["title"].tolist()[:3]
@@ -82,17 +81,38 @@ selected_titles = st.multiselect(
     ),
 )
 
-# 展示选中菜谱的详情
+# 记录每道菜要吃几顿（份数乘数）
+recipe_portions = {}
+
 if selected_titles:
-    st.markdown("### 📖 已选菜谱预览")
-    cols = st.columns(min(len(selected_titles), 3))
+    st.markdown("### 📖 已选菜谱预览与餐数规划")
     selected_rows = df_recipes[df_recipes["title"].isin(selected_titles)]
 
+    cols = st.columns(min(len(selected_titles), 3))
+
     for idx, (_, row) in enumerate(selected_rows.iterrows()):
+        title = row["title"]
         with cols[idx % 3]:
-            st.info(f"**{row['title']}**")
+            # 展示菜谱图片
+            if row["image"] and str(row["image"]).startswith("http"):
+                st.image(row["image"], use_container_width=True)
+            else:
+                st.info("🖼 暂无图片")
+
+            st.subheader(title)
             st.caption(f"⏱ 准备时间：{row['prep_time']}")
-            with st.expander("查看烹饪步骤与食材"):
+
+            # 设置餐数乘数
+            portions = st.number_input(
+                f"这道菜准备吃几顿？(份数)",
+                min_value=1,
+                max_value=14,
+                value=4 if idx == 0 else 1,  # 默认第一道做 4 顿午餐 Meal Prep
+                key=f"portion_{idx}",
+            )
+            recipe_portions[title] = portions
+
+            with st.expander("查看单份食材与烹饪步骤"):
                 st.write("**食材列表：**")
                 st.write(row["ingredients"])
                 st.write("**制作步骤：**")
@@ -103,35 +123,41 @@ st.divider()
 st.header("🛒 第二步：智能合并采购清单")
 
 
-def parse_and_merge_ingredients(selected_rows, pantry_list):
-    """解析食材，合并同类项，并自动扣除冰箱已有食材"""
+def parse_and_merge_ingredients(selected_rows, portions_map, pantry_list):
+    """解析食材，乘以对应餐数，合并同类项，并扣除冰箱库存"""
     raw_ingredients = []
 
     for _, row in selected_rows.iterrows():
+        title = row["title"]
+        multiplier = portions_map.get(title, 1)
+
         ing_text = str(row["ingredients"])
-        # 处理按 '|' 或换行分隔的食材
         items = re.split(r"[|\n]", ing_text)
+
         for item in items:
             cleaned = item.strip().strip("•").strip()
             if cleaned:
-                raw_ingredients.append(cleaned)
+                # 记录食材项与对应的餐数倍数
+                raw_ingredients.append((cleaned, multiplier))
 
     # 去重与扣除冰箱库存
     shopping_items = []
-    for item in raw_ingredients:
+    for item, mult in raw_ingredients:
         # 判断是否在冰箱已有库存中
         is_in_pantry = any(p.lower() in item.lower() for p in pantry_list if p)
         if not is_in_pantry:
-            shopping_items.append(item)
+            shopping_items.append((item, mult))
 
-    # 合并完全相同的食材项
-    item_counts = {}
-    for item in shopping_items:
-        item_counts[item] = item_counts.get(item, 0) + 1
+    # 合并相同食材，汇总餐数/剂量
+    item_totals = {}
+    for item, mult in shopping_items:
+        item_totals[item] = item_totals.get(item, 0) + mult
 
     final_list = []
-    for item, count in item_counts.items():
-        display_text = f"{item} (x{count} 份量)" if count > 1 else item
+    for item, total_mult in item_totals.items():
+        display_text = (
+            f"{item} (需准备 {total_mult} 份量)" if total_mult > 1 else item
+        )
         final_list.append({"完成": False, "食材项": display_text})
 
     return final_list
@@ -139,14 +165,18 @@ def parse_and_merge_ingredients(selected_rows, pantry_list):
 
 if selected_titles:
     selected_rows = df_recipes[df_recipes["title"].isin(selected_titles)]
-    shopping_data = parse_and_merge_ingredients(selected_rows, all_pantry)
+    shopping_data = parse_and_merge_ingredients(
+        selected_rows, recipe_portions, all_pantry
+    )
 
     if shopping_data:
-        st.write("已为你整合所有所需食材，并**自动扣除**了冰箱已有的食材：")
+        st.write(
+            "已根据你设置的**餐数倍数**进行自动汇总，并**扣除**了冰箱已有食材："
+        )
 
-        # 使用 DataFrame 搭配 st.data_editor 呈现无刷新勾选框
         df_shopping = pd.DataFrame(shopping_data)
 
+        # 无刷新可勾选表格
         edited_df = st.data_editor(
             df_shopping,
             column_config={
@@ -156,7 +186,7 @@ if selected_titles:
                     default=False,
                 ),
                 "食材项": st.column_config.TextColumn(
-                    "采购项目 (含剂量)", disabled=True
+                    "采购项目 (已计算总份量)", disabled=True
                 ),
             },
             disabled=["食材项"],
@@ -176,6 +206,6 @@ if selected_titles:
             st.balloons()
             st.success("🎉 太棒了！本周所有食材已全部备齐，可以开始大展身手了！")
     else:
-        st.success("🎉 调取结果：所选菜谱需要的食材你冰箱里全部都有，无需采购！")
+        st.success("🎉 所选菜谱需要的食材你冰箱里全部都有，无需采购！")
 else:
-    st.warning("👈 请先在上方勾选至少一道菜谱，系统将自动为你生成采购清单。")
+    st.warning("👈 请先在上方勾选至少一道菜谱。")
