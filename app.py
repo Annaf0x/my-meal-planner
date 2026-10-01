@@ -59,25 +59,57 @@ if "my_fridge_items" not in st.session_state:
     st.session_state.my_fridge_items = ["盐", "黑胡椒", "食用油", "水"]
 
 
-# ==================== 4. 数值解析与用量计算 ====================
+# ==================== 4. 分数转换与智能用量计算 ====================
+FRACTION_MAP = {
+    "½": 0.5,
+    "⅓": 0.333,
+    "⅔": 0.667,
+    "¼": 0.25,
+    "¾": 0.75,
+    "⅕": 0.2,
+    "⅖": 0.4,
+    "⅗": 0.6,
+    "⅘": 0.8,
+    "⅙": 0.167,
+    "⅚": 0.833,
+    "⅛": 0.125,
+    "⅜": 0.375,
+    "⅝": 0.625,
+    "⅞": 0.875,
+}
+
+
 def parse_and_multiply_ingredient(item_str, servings):
-    """解析数字用量，直接乘以 servings 计算总数"""
+    """解析包括小数、整数、特殊分数符号在内的用量，并乘以 servings"""
     item_str = item_str.strip().strip("*")
-    match = re.match(r"^([\d\.]+)\s*(.*)", item_str)
 
-    if match:
-        num = float(match.group(1))
-        unit_and_name = match.group(2)
-        total_num = num * servings
+    # 替换 Unicode 分数符号为浮点数
+    for frac_char, val in FRACTION_MAP.items():
+        if frac_char in item_str:
+            item_str = item_str.replace(frac_char, str(val))
 
-        if total_num.is_integer():
-            formatted_num = str(int(total_num))
-        else:
-            formatted_num = f"{total_num:.2f}".rstrip("0").rstrip(".")
+    # 匹配普通数字/小数 或 形如 1/2 的分数结构
+    match_slash = re.match(r"^(\d+)\/(\d+)\s*(.*)", item_str)
+    match_num = re.match(r"^([\d\.]+)\s*(.*)", item_str)
 
-        return formatted_num, unit_and_name
+    if match_slash:
+        num = float(match_slash.group(1)) / float(match_slash.group(2))
+        unit_and_name = match_slash.group(3)
+    elif match_num:
+        num = float(match_num.group(1))
+        unit_and_name = match_num.group(2)
     else:
+        # 实在解析不出来数字的项目才拼接 (X 份)
         return None, f"{item_str} ({servings} 份)"
+
+    total_num = num * servings
+
+    if total_num.is_integer():
+        formatted_num = str(int(total_num))
+    else:
+        formatted_num = f"{total_num:.2f}".rstrip("0").rstrip(".")
+
+    return formatted_num, unit_and_name
 
 
 def generate_unified_shopping_list(selected_meals, fridge_items):
@@ -327,7 +359,6 @@ if st.session_state.selected_meals:
     st.divider()
     st.header("💾 保存 / 导出菜单与清单")
 
-    # 生成导出的文本内容
     export_text = "==== 🥗 本周菜谱计划 (Meal Plan) ====\n\n"
     for r_id, info in st.session_state.selected_meals.items():
         export_text += f"• {info['title']} ({info['servings']} 份/servings)\n"
