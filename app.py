@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 
-# ==================== 2. 数据加载函数 ====================
+# ==================== 2. 数据加载函数 (自动兼容列名) ====================
 @st.cache_data
 def load_data():
     file_path = "recipes_for_notion_cn_cleaned.csv"
@@ -24,10 +24,15 @@ def load_data():
     df["ingredients"] = df["ingredients"].fillna("")
     df["instructions"] = df["instructions"].fillna("暂无详细步骤")
     df["prep_time"] = df["prep_time"].fillna("15-20 分钟")
-    if "image" not in df.columns:
-        df["image"] = ""
+
+    # 自动识别兼容 image_url 与 image 列名
+    if "image_url" in df.columns:
+        df["img_link"] = df["image_url"].fillna("")
+    elif "image" in df.columns:
+        df["img_link"] = df["image"].fillna("")
     else:
-        df["image"] = df["image"].fillna("")
+        df["img_link"] = ""
+
     return df
 
 
@@ -93,11 +98,10 @@ if selected_titles:
     for idx, (_, row) in enumerate(selected_rows.iterrows()):
         title = row["title"]
         with cols[idx % 3]:
-            # 展示菜谱图片
-            if row["image"] and str(row["image"]).startswith("http"):
-                st.image(row["image"], use_container_width=True)
-            else:
-                st.info("🖼 暂无图片")
+            # 展示菜谱图片（完美读取 image_url）
+            img_src = str(row["img_link"]).strip()
+            if img_src.startswith("http"):
+                st.image(img_src, use_container_width=True)
 
             st.subheader(title)
             st.caption(f"⏱ 准备时间：{row['prep_time']}")
@@ -171,7 +175,7 @@ if selected_titles:
 
     if shopping_data:
         st.write(
-            "已根据你设置的**餐数倍数**进行自动汇总，并**扣除**了冰箱已有食材："
+            "已根据你设置的**餐数倍数**进行自动汇总，并**自动扣除**了冰箱已有食材："
         )
 
         df_shopping = pd.DataFrame(shopping_data)
